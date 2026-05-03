@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set -euo pipefail
-[[ -n "${DEBUG}" ]] && set -x
+[[ -n "${DEBUG:-}" ]] && set -x
 
 # Error helpers
 trap 'echo "rootfs: ERROR at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
@@ -46,6 +46,7 @@ setup_nvidia-nvrc() {
 	ver=$(get_package_version_from_kata_yaml "externals.nvrc.version")
 
 	local dl="${url}/${ver}"
+	mkdir -p "${BUILD_DIR}"
 	curl -fsSL -o "${BUILD_DIR}/${nvrc}.tar.xz" "${dl}/${nvrc}.tar.xz"
 	curl -fsSL -o "${BUILD_DIR}/${nvrc}.tar.xz.sig" "${dl}/${nvrc}.tar.xz.sig"
 	curl -fsSL -o "${BUILD_DIR}/${nvrc}.tar.xz.cert" "${dl}/${nvrc}.tar.xz.cert"
@@ -54,7 +55,7 @@ setup_nvidia-nvrc() {
 	local oidc="https://token.actions.githubusercontent.com"
 
 	# Only allow releases from the NVIDIA/nvrc main branch and build by github actions
-	cosign verify-blob                                 \
+	/usr/bin/cosign verify-blob                                 \
 	  --rekor-url https://rekor.sigstore.dev           \
 	  --certificate "${BUILD_DIR}/${nvrc}.tar.xz.cert" \
 	  --signature   "${BUILD_DIR}/${nvrc}.tar.xz.sig"  \
@@ -82,6 +83,7 @@ setup_nvidia_gpu_rootfs_stage_one() {
 	if [[ ! -e  "${BUILD_DIR}/${nvrc}.tar.xz" ]]; then
 		setup_nvidia-nvrc
 	fi
+	mkdir -p ./bin/
 	tar -xvf "${BUILD_DIR}/${nvrc}.tar.xz" -C ./bin/
 
 	local appendix=""
@@ -91,7 +93,12 @@ setup_nvidia_gpu_rootfs_stage_one() {
 
 	# Install the precompiled kernel modules shipped with the kernel
 	mkdir -p ./lib/modules/
-	tar --zstd -xvf "${BUILD_DIR}"/kata-static-kernel-nvidia-gpu"${appendix}"-modules.tar.zst -C ./lib/modules/
+	local km_tarball="${BUILD_DIR}/kata-static-kernel-nvidia-gpu${appendix}-modules.tar.zst"
+	if [[ -f "${km_tarball}" ]]; then
+		tar --zstd -xvf "${km_tarball}" -C ./lib/modules/
+	else
+		echo "nvidia: WARNING: kernel modules tarball not found, skipping extraction"
+	fi
 
 	mount --rbind /dev ./dev
 	mount --make-rslave ./dev
@@ -253,7 +260,12 @@ setup_nvrc_init_symlinks() {
 
 chisseled_init() {
 	echo "nvidia: chisseling init"
-	tar --zstd -xvf "${BUILD_DIR}"/kata-static-busybox.tar.zst -C .
+	local bb_tarball="${BUILD_DIR}/kata-static-busybox.tar.zst"
+	if [[ -f "${bb_tarball}" ]]; then
+		tar --zstd -xvf "${bb_tarball}" -C .
+	else
+		echo "nvidia: WARNING: busybox tarball not found, skipping extraction"
+	fi
 
 	mkdir -p dev etc proc run/cdi sys tmp usr var lib/modules lib/firmware \
 		 usr/share/nvidia lib/"${machine_arch}"-linux-gnu lib64        \

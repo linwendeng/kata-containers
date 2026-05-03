@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-[[ -n "${DEBUG}" ]] && set -o xtrace
+[[ -n "${DEBUG:-}" ]] && set -o xtrace
 
 # If we fail for any reason a message will be displayed
 die() {

@@ -273,8 +273,7 @@ exit "${error}"
 }
 
 get_distros() {
-	cdirs=$(find "${script_dir}" -maxdepth 1 -type d)
-	find "${cdirs}" -maxdepth 1 -name "${CONFIG_SH}" -printf '%H\n' | while read -r dir; do
+	find "${script_dir}" -mindepth 2 -maxdepth 2 -name "${CONFIG_SH}" -printf '%h\n' | while read -r dir; do
 		basename "${dir}"
 	done
 }
@@ -698,6 +697,7 @@ EOF
 	esac
 
 	info "Configure chrony file ${chrony_conf_file}"
+	mkdir -p "$(dirname "${chrony_conf_file}")"
 	cat >> "${chrony_conf_file}" <<EOF
 refclock PHC /dev/ptp0 poll 3 dpoll -2 offset 0
 # Step the system clock instead of slewing it if the adjustment is larger than

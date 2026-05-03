@@ -169,8 +169,8 @@ create_summary_file()
 	local -r now=$(date -u -d@"${SOURCE_DATE_EPOCH:-$(date +%s.%N)}" '+%Y-%m-%dT%T.%N%zZ')
 
 	# sanitise package lists
-	PACKAGES=$(echo "${PACKAGES}"|tr ' ' '\n'|sort -u|tr '\n' ' ')
-	EXTRA_PKGS=$(echo "${EXTRA_PKGS}"|tr ' ' '\n'|sort -u|tr '\n' ' ')
+	PACKAGES=$(echo "${PACKAGES:-}"|tr ' ' '\n'|sort -u|tr '\n' ' ')
+	EXTRA_PKGS=$(echo "${EXTRA_PKGS:-}"|tr ' ' '\n'|sort -u|tr '\n' ' ')
 
 	local -r packages=$(for pkg in ${PACKAGES}; do echo "      - \"${pkg}\""; done)
 	local -r extra=$(for pkg in ${EXTRA_PKGS}; do echo "      - \"${pkg}\""; done)
@@ -198,15 +198,15 @@ create_summary_file()
 	cat >"${file}"<<-EOF
 	---
 	osbuilder:
-	  url: "${osbuilder_url}"
-	  version: "${OSBUILDER_VERSION}"
-	rootfs-creation-time: "${now}"
+	  url: "${osbuilder_url:-}"
+	  version: "${OSBUILDER_VERSION:-}"
+	rootfs-creation-time: "${now:-}"
 	description: "osbuilder rootfs"
-	file-format-version: "${format_version}"
-	architecture: "${ARCH}"
+	file-format-version: "${format_version:-}"
+	architecture: "${ARCH:-}"
 	base-distro:
-	  name: "${OS_NAME}"
-	  version: "${OS_VERSION}"
+	  name: "${OS_NAME:-}"
+	  version: "${OS_VERSION:-}"
 	  packages:
 	    default:
 ${packages}
@@ -273,11 +273,11 @@ get_package_version_from_kata_yaml()
 	local yq_version
 	local yq_args
 
-	# shellcheck disable=SC2154
-	typeset -r yq=$(command -v yq || command -v "${GOPATH}/bin/yq" || echo "${GOPATH}/bin/yq")
-	if [[ ! -f "${yq}" ]]; then
+	typeset yq=$(command -v yq || command -v "${GOPATH:-${HOME}/go}/bin/yq" || echo "${GOPATH:-${HOME}/go}/bin/yq")
+	if [[ ! -f "${yq}" ]] || ! "${yq}" --version 2>&1 | grep -q 'mikefarah'; then
 		# shellcheck source=/dev/null
 		source "${yq_file}"
+		yq="${GOPATH:-${HOME}/go}/bin/yq"
 	fi
 
 	yq_version=$(${yq} -V)
