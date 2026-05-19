@@ -453,7 +453,9 @@ impl VfioDevice {
             return None;
         }
 
-        match device_class.parse::<u32>() {
+        // sysfs reports class as a hex string like "0x060400"; strip "0x" and parse base-16.
+        let class_str = device_class.trim().trim_start_matches("0x");
+        match u32::from_str_radix(class_str, 16) {
             Ok(cid_u32) => {
                 // class code is 16 bits, remove the two trailing zeros
                 let class_code = u64::from(cid_u32) >> 8;
@@ -637,8 +639,13 @@ impl PCIeDevice for VfioDevice {
 
         self.device_options.clear();
         for hostdev in self.devices.iter_mut() {
+            // Use a per-BDF topology key so that every BDF in a multi-device
+            // IOMMU group gets its own PCIe slot. Previously all BDFs shared
+            // self.device_id, which the topology dedup'd to a single slot -
+            // leaving secondary BDFs with an empty pci_path / QOM path.
+            let per_bdf_id = format!("{}-{}", self.device_id, hostdev.bus_slot_func);
             let pci_path = do_add_pcie_endpoint(
-                self.device_id.clone(),
+                per_bdf_id,
                 hostdev.guest_pci_path.clone(),
                 pcie_topo,
             )
@@ -658,7 +665,19 @@ impl PCIeDevice for VfioDevice {
     }
 
     async fn unregister(&mut self, pcie_topo: &mut PCIeTopology) -> Result<()> {
-        if let Some(_slot) = pcie_topo.remove_device(&self.device_id.clone()) {
+        let mut removed_any = false;
+        // Remove the per-BDF entries added by register().
+        for hostdev in self.devices.iter() {
+            let per_bdf_id = format!("{}-{}", self.device_id, hostdev.bus_slot_func);
+            if pcie_topo.remove_device(&per_bdf_id).is_some() {
+                removed_any = true;
+            }
+        }
+        // Back-compat: also try the legacy parent id (pre per-BDF fix).
+        if pcie_topo.remove_device(&self.device_id).is_some() {
+            removed_any = true;
+        }
+        if removed_any {
             Ok(())
         } else {
             Err(anyhow!(

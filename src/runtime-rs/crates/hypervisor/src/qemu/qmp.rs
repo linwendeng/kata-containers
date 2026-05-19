@@ -36,7 +36,7 @@ use std::time::Instant;
 /// default qmp connection read timeout
 const DEFAULT_QMP_READ_TIMEOUT: u64 = 250;
 const DEFAULT_QMP_INIT_READ_TIMEOUT: u64 = 5000;
-const DEFAULT_QMP_CONNECT_DEADLINE_MS: u64 = 50000;
+const DEFAULT_QMP_CONNECT_DEADLINE_MS: u64 = 600000;
 const DEFAULT_QMP_RETRY_SLEEP_MS: u64 = 50;
 
 pub struct Qmp {

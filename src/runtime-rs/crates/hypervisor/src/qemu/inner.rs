@@ -205,7 +205,7 @@ impl QemuInner {
                     // To avoid holding the lock for too long, we first snapshot the necessary VFIO parameters,
                     // then release the lock before doing the coldplug via cmdline,
                     // and finally re-acquire the lock to update the guest PCI path after coldplug.
-                    let (devices, bus_port_id) = {
+                    let (devices, bus_port_id, extra_bus_port_ids) = {
                         let vfio_device = vfio_dev.lock().await;
                         let devices = vfio_device
                             .device
@@ -214,19 +214,67 @@ impl QemuInner {
                             .map(|g| g.clone().devices)
                             .unwrap_or_default();
 
-                        (devices, vfio_device.config.bus_port_id.clone())
+                        (
+                            devices,
+                            vfio_device.config.bus_port_id.clone(),
+                            vfio_device.extra_bus_port_ids.clone(),
+                        )
                     };
+
+                    // Build the per-endpoint port assignment list. The first non-bridge
+                    // device uses the primary `bus_port_id`; subsequent ones use the
+                    // additional ports that `register()` reserved for them.
+                    let mut port_assignments: Vec<&(String, u32, u32)> =
+                        Vec::with_capacity(1 + extra_bus_port_ids.len());
+                    port_assignments.push(&bus_port_id);
+                    for extra in extra_bus_port_ids.iter() {
+                        port_assignments.push(extra);
+                    }
+                    let mut next_port_idx = 0usize;
 
                     // Cold plug devices
                     for dev in devices.iter() {
+                        // Skip Host/PCI bridges and audio devices that share the IOMMU
+                        // group with the passthrough endpoint: they cannot be bound to
+                        // vfio-pci and would cause QEMU to fail device setup.
+                        if let Some(class_code) = dev.class_code {
+                            // class_code is the 24-bit sysfs class; bits 23:8 = base+sub class.
+                            let bs = (class_code >> 8) as u64;
+                            // 0x06xx = Bridge, 0x0403 = Multimedia audio
+                            if (bs & 0x0600) == 0x0600 || (bs & 0x0403) == 0x0403 {
+                                info!(
+                                    sl!(),
+                                    "VFIO cold-plug: skipping non-endpoint device {} (class 0x{:06x})",
+                                    dev.addr,
+                                    class_code,
+                                );
+                                continue;
+                            }
+                        }
                         let host_bdf = dev.addr.to_string();
+
+                        let port = match port_assignments.get(next_port_idx) {
+                            Some(p) => *p,
+                            None => {
+                                return Err(anyhow::anyhow!(
+                                    "VFIO cold-plug: no reserved root port available for endpoint {} (need at least {} ports, have {})",
+                                    host_bdf,
+                                    next_port_idx + 1,
+                                    port_assignments.len()
+                                ));
+                            }
+                        };
+                        next_port_idx += 1;
 
                         let vfio_cfg = VfioDeviceConfig::new(
                             host_bdf,
-                            bus_port_id.1 as u16,
-                            bus_port_id.1 + 1,
+                            port.1 as u16,
+                            port.1 + 1,
                         )
-                        .with_vfio_bus(bus_port_id.0.clone());
+                        .with_vfio_bus(port.0.clone())
+                        // All endpoints of a single host IOMMU group must share
+                        // the same iommufd object; tie it to the primary port id.
+                        .with_iommufd_id(format!("iommufd{}", bus_port_id.0));
 
                         cmdline.add_pcie_vfio_device(vfio_cfg)?;
                     }

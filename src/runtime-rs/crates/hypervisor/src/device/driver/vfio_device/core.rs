@@ -375,8 +375,8 @@ fn filter_bridge_device(bdf: &str, bitmasks: &[u64]) -> Option<u64> {
         return None;
     }
 
-    match device_class.parse::<u32>() {
-        Ok(cid_u32) => {
+    match parse_class_code_u32(&device_class) {
+        Some(cid_u32) => {
             // PCI class code is 24 bits, shift right 8 to get base+sub class
             let class_code = u64::from(cid_u32) >> 8;
             for &bitmask in bitmasks {
