@@ -15,7 +15,9 @@ COPY install_oras.sh /usr/bin/install_oras.sh
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Install yq, oras, and docker
-RUN apt-get update && \
+# Use Azure mirror — ports.ubuntu.com IPs are blocked from this network.
+RUN sed -i 's#ports.ubuntu.com#azure.ports.ubuntu.com#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         docker.io \
@@ -27,6 +29,9 @@ RUN apt-get update && \
     apt-get clean && rm -rf /var/lib/apt/lists/ && \
     install_yq.sh && \
     install_oras.sh
+
+# Allow git to operate on host-mounted repos owned by other UIDs
+RUN git config --system --add safe.directory '*'
 
 ARG IMG_USER=kata-builder
 ARG UID=1000

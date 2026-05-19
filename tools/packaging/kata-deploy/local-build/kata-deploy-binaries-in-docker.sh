@@ -119,6 +119,7 @@ KERNEL_DEBUG_ENABLED="${KERNEL_DEBUG_ENABLED:-}"
 INIT_DATA="${INIT_DATA:-yes}"
 
 docker run \
+	--add-host=ports.ubuntu.com:91.189.92.21 \
 	-v "${HOME}"/.docker:/root/.docker \
 	-v /var/run/docker.sock:/var/run/docker.sock \
 	-v "${kata_dir}:${kata_dir}" \

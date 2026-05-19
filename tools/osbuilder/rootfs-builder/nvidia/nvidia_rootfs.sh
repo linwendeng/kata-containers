@@ -315,7 +315,8 @@ compress_rootfs() {
 			continue
 		fi
 		strip "${file}"
-		"${BUILD_DIR}"/upx-4.2.4-"${distro_arch}"_linux/upx --best --lzma "${file}"
+		"${BUILD_DIR}"/upx-4.2.4-"${distro_arch}"_linux/upx --best --lzma "${file}" || \
+			echo "nvidia: upx failed (skipped): ${file}"
 	done
 
  	# While I was playing with compression the executable flag on

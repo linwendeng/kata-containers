@@ -58,15 +58,31 @@ install_userspace_components() {
 	echo "chroot: driver_version: ${driver_version}"
 
 	eval "${APT_INSTALL}" nvidia-driver-pinning-"${driver_version}"
-	eval "${APT_INSTALL}" nvidia-imex nvidia-firmware    \
-		libnvidia-cfg1 libnvidia-gl libnvidia-extra      \
-		libnvidia-decode libnvidia-fbc1 libnvidia-encode \
-		libnvidia-nscq libnvidia-compute nvidia-settings
+	# Use the major-version suffixed package names so apt's resolver picks the
+	# driver branch matching ${driver_version} instead of the newest virtual
+	# provider (e.g. libnvidia-compute-595 pulled in via libnvidia-compute).
+	driver_major="${driver_version%%.*}"
+	eval "${APT_INSTALL}" nvidia-imex nvidia-firmware-"${driver_major}"="${driver_version}"-1ubuntu1 \
+		libnvidia-cfg1-"${driver_major}"                 \
+		libnvidia-gl-"${driver_major}"                   \
+		libnvidia-extra-"${driver_major}"                \
+		libnvidia-decode-"${driver_major}"               \
+		libnvidia-fbc1-"${driver_major}"                 \
+		libnvidia-encode-"${driver_major}"               \
+		libnvidia-nscq                                   \
+		libnvidia-compute-"${driver_major}"              \
+		nvidia-settings
 
-	apt-mark hold nvidia-imex nvidia-firmware            \
-		libnvidia-cfg1 libnvidia-gl libnvidia-extra      \
-		libnvidia-decode libnvidia-fbc1 libnvidia-encode \
-		libnvidia-nscq libnvidia-compute nvidia-settings
+	apt-mark hold nvidia-imex nvidia-firmware-"${driver_major}" \
+		libnvidia-cfg1-"${driver_major}"                 \
+		libnvidia-gl-"${driver_major}"                   \
+		libnvidia-extra-"${driver_major}"                \
+		libnvidia-decode-"${driver_major}"               \
+		libnvidia-fbc1-"${driver_major}"                 \
+		libnvidia-encode-"${driver_major}"               \
+		libnvidia-nscq                                   \
+		libnvidia-compute-"${driver_major}"              \
+		nvidia-settings
 
 	# Needed for confidential-data-hub and NVAT runtime dependencies
 	eval "${APT_INSTALL}" cryptsetup-bin dmsetup         \
