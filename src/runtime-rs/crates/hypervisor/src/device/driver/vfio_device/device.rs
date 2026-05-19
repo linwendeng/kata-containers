@@ -80,6 +80,13 @@ pub struct VfioDeviceModern {
 
     /// Reference count for active attachments
     pub attach_count: u64,
+
+    /// Additional (root_port_id, port, chassis) tuples reserved for extra
+    /// non-bridge endpoints that share the same host IOMMU group as the
+    /// primary device (whose port lives in `config.bus_port_id`). One root
+    /// port is required per passthrough endpoint because pcie-root-port
+    /// only hosts a single device on its downstream bus.
+    pub extra_bus_port_ids: Vec<(String, u32, u32)>,
 }
 
 /// Path used for [`discover_vfio_group_device`] when `iommu_device_node` is unset.
@@ -115,6 +122,7 @@ impl VfioDeviceModern {
             device_options: Vec::new(),
             is_allocated: false,
             attach_count: 0,
+            extra_bus_port_ids: Vec::new(),
         })
     }
 }
@@ -288,8 +296,51 @@ impl PCIeDevice for VfioDeviceModernHandle {
             None => return Err(anyhow::anyhow!("can not get bus port")),
         };
 
+        // Count non-bridge endpoints in the IOMMU group; each one needs its own
+        // root port because pcie-root-port hosts only a single downstream device.
+        let endpoint_count: usize = self
+            .with(|d| {
+                d.device
+                    .iommu_group
+                    .as_ref()
+                    .map(|g| {
+                        g.devices
+                            .iter()
+                            .filter(|info| {
+                                info.class_code
+                                    .map(|c| {
+                                        let bs = (c >> 8) as u64;
+                                        // Exclude bridges (0x06xx) and audio (0x0403)
+                                        (bs & 0x0600) != 0x0600 && (bs & 0x0403) != 0x0403
+                                    })
+                                    .unwrap_or(true)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(1)
+            })
+            .await
+            .max(1);
+
+        // Reserve N-1 additional root ports for the remaining endpoints in this group.
+        let mut extras: Vec<(String, u32, u32)> = Vec::with_capacity(endpoint_count.saturating_sub(1));
+        for i in 1..endpoint_count {
+            let synthetic_id = format!("{}__extra_{}", device_id, i);
+            let extra = topo
+                .reserve_bus_for_device(&synthetic_id, port_type)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not reserve additional root port for endpoint #{} of {}",
+                        i,
+                        device_id
+                    )
+                })?;
+            extras.push(extra);
+        }
+
         self.with_mut(|d| {
             d.config.bus_port_id = bus_port_id;
+            d.extra_bus_port_ids = extras;
             d.is_allocated = true;
         })
         .await;
@@ -302,9 +353,17 @@ impl PCIeDevice for VfioDeviceModernHandle {
         let device_id = self.device_id().await;
         topo.release_bus_for_device(&device_id)?;
 
+        // Release any additional root ports that were reserved for extra endpoints.
+        let extras = self.with(|d| d.extra_bus_port_ids.clone()).await;
+        for (i, _) in extras.iter().enumerate() {
+            let synthetic_id = format!("{}__extra_{}", device_id, i + 1);
+            let _ = topo.release_bus_for_device(&synthetic_id);
+        }
+
         self.with_mut(|d| {
             d.is_allocated = false;
             d.config.bus_port_id.0.clear();
+            d.extra_bus_port_ids.clear();
             d.config.guest_pci_path = None;
         })
         .await;

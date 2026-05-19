@@ -307,9 +307,6 @@ impl VirtSandbox {
             sl!(),
             "sandbox pod_resource_socket: {:?}", pod_resource_socket
         );
-        if pod_resource_socket.is_empty() || !Path::new(pod_resource_socket).exists() {
-            return Ok(Vec::new());
-        }
 
         let annotations = &sandbox_config.annotations;
         debug!(
@@ -319,10 +316,36 @@ impl VirtSandbox {
             annotations.get("io.kubernetes.cri.sandbox-namespace")
         );
 
-        let cdi_devices =
+        // Extract CDI device FQNs from CRI annotations of the form
+        //   cdi.k8s.io/<key> = "vendor.com/class=name[,vendor.com/class=name...]"
+        // This lets crictl-driven (kubelet-less) flows cold-plug VFIO devices,
+        // as long as the caller injects the standard CDI annotations.
+        let annotation_cdi_devices: Vec<String> = annotations
+            .iter()
+            .filter(|(k, _)| k.starts_with(pod_resources_rs::pod_resources::CDI_K8S_PREFIX))
+            .flat_map(|(_, v)| v.split(','))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let cdi_devices = if !annotation_cdi_devices.is_empty() {
+            info!(
+                sl!(),
+                "cold-plug: using CDI devices from cdi.k8s.io/* annotations: {:?}",
+                annotation_cdi_devices
+            );
+            annotation_cdi_devices
+        } else if !pod_resource_socket.is_empty() && Path::new(pod_resource_socket).exists() {
             pod_resources_rs::pod_resources::get_pod_cdi_devices(pod_resource_socket, annotations)
                 .await
-                .context("failed to query Pod Resources CDI devices")?;
+                .context("failed to query Pod Resources CDI devices")?
+        } else {
+            info!(
+                sl!(),
+                "cold-plug: no CDI annotations and no kubelet pod-resources socket; skipping"
+            );
+            return Ok(Vec::new());
+        };
         info!(sl!(), "pod cdi devices: {:?}", cdi_devices);
 
         let device_nodes = handle_cdi_devices(&cdi_devices).await?;

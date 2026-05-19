@@ -19,7 +19,7 @@ use kata_types::config::hypervisor::VIRTIO_SCSI;
 use kata_types::rootless::is_rootless;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Write};
 use std::fs::{read_to_string, File};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
@@ -2334,6 +2334,13 @@ pub struct VfioDeviceConfig {
 
     /// Optional PCI Device ID override.
     pub x_pci_device_id: Option<String>,
+
+    /// Optional override for the iommufd object id. When `Some(name)`, the
+    /// generator will (re)use a shared `iommufd` object with that id instead
+    /// of deriving one from `bus`. This is required when multiple PCIe
+    /// endpoints share a single host IOMMU group: QEMU expects a single
+    /// iommufd backend instance bound to that group.
+    pub iommufd_id: Option<String>,
 }
 
 impl VfioDeviceConfig {
@@ -2352,6 +2359,7 @@ impl VfioDeviceConfig {
             vfio_addr: format!("0x{}", port),
             x_pci_vendor_id: None,
             x_pci_device_id: None,
+            iommufd_id: None,
         }
     }
 
@@ -2362,6 +2370,14 @@ impl VfioDeviceConfig {
 
     pub fn with_vfio_bus(mut self, bus: impl Into<String>) -> Self {
         self.bus = bus.into();
+        self
+    }
+
+    /// Override the iommufd object id used for this device. Useful when
+    /// multiple endpoints share a host IOMMU group and must therefore share a
+    /// single iommufd object in QEMU.
+    pub fn with_iommufd_id(mut self, iommufd_id: impl Into<String>) -> Self {
+        self.iommufd_id = Some(iommufd_id.into());
         self
     }
 
@@ -2543,6 +2559,14 @@ pub struct QemuCmdLine<'a> {
 
     devices: Vec<Box<dyn ToQemuParams>>,
     ccw_subchannel: Option<CcwSubChannel>,
+
+    // Track already-emitted iommufd object ids and pcie-root-port device ids
+    // so cold-plugging multiple BDFs of the same IOMMU group does not produce
+    // duplicate `-object iommufd,id=...` / `-device pcie-root-port,id=...` args
+    // (which QEMU rejects with "Duplicate ID"). Each BDF still emits its own
+    // `vfio-pci`.
+    emitted_iommufd_ids: HashSet<String>,
+    emitted_pcie_root_port_ids: HashSet<String>,
 }
 
 impl<'a> QemuCmdLine<'a> {
@@ -2563,6 +2587,8 @@ impl<'a> QemuCmdLine<'a> {
             knobs: Knobs::new(config),
             devices: Vec::new(),
             ccw_subchannel,
+            emitted_iommufd_ids: HashSet::new(),
+            emitted_pcie_root_port_ids: HashSet::new(),
         };
 
         if config.device_info.enable_iommu {
@@ -2938,7 +2964,7 @@ impl<'a> QemuCmdLine<'a> {
 
     pub fn add_iommufd(&mut self, id: impl Into<String>) -> Result<()> {
         let id_str = id.into();
-        if !id_str.is_empty() {
+        if !id_str.is_empty() && self.emitted_iommufd_ids.insert(id_str.clone()) {
             let iommufd = ObjectIommufd::new(id_str);
             self.devices.push(Box::new(iommufd));
         }
@@ -2994,16 +3020,24 @@ impl<'a> QemuCmdLine<'a> {
             }
         };
 
-        let iommufd_name = format!("iommufd{}", config.bus);
+        let iommufd_name = match &config.iommufd_id {
+            Some(name) => name.clone(),
+            None => format!("iommufd{}", config.bus),
+        };
         self.add_iommufd(&iommufd_name)?;
 
         let root_port_id = config.bus.clone();
-        let root_port = PCIeRootPortDevice::new(&root_port_id, DEFAULT_PCIE_ROOT_BUS)
-            .with_chassis(config.chassis)
-            .with_slot(config.port as u32)
-            .with_multifunction(multi_function)
-            .with_addr(format!("0x{:02x}", config.port));
-        info!(sl!(), "PCIe Root Port: {:?}", root_port.clone());
+        // Emit the pcie-root-port only once per id. Subsequent BDFs of the
+        // same IOMMU group reuse the existing root port.
+        if self.emitted_pcie_root_port_ids.insert(root_port_id.clone()) {
+            let root_port = PCIeRootPortDevice::new(&root_port_id, DEFAULT_PCIE_ROOT_BUS)
+                .with_chassis(config.chassis)
+                .with_slot(config.port as u32)
+                .with_multifunction(multi_function)
+                .with_addr(format!("0x{:02x}", config.port));
+            info!(sl!(), "PCIe Root Port: {:?}", root_port.clone());
+            self.devices.push(Box::new(root_port));
+        }
 
         let mut vfio_device = PCIeVfioDevice::new(&config.host_bdf, root_port_id, &iommufd_name);
 
@@ -3015,8 +3049,6 @@ impl<'a> QemuCmdLine<'a> {
             vfio_device = vfio_device.with_device_id(device_id);
         }
 
-        self.devices.reserve(2);
-        self.devices.push(Box::new(root_port));
         self.devices.push(Box::new(vfio_device));
 
         Ok(())
