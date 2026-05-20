@@ -487,6 +487,7 @@ struct Machine {
     accel: String,
     options: String,
     nvdimm: bool,
+    hmat: bool,
     kernel_irqchip: Option<String>,
     confidential_guest_support: String,
 
@@ -516,11 +517,20 @@ impl Machine {
             accel: "kvm".to_owned(),
             options: config.machine_info.machine_accelerators.clone(),
             nvdimm: false,
+            hmat: false,
             kernel_irqchip: Some("on".to_owned()), // default to off, will be turned on if needed by VFIO devices
             confidential_guest_support: "".to_owned(),
             is_nvdimm_supported,
             memory_backend: None,
         }
+    }
+
+    /// Enable ACPI HMAT support on the machine.  Required by QEMU before any
+    /// `acpi-generic-initiator` object can be used to bind a PCIe endpoint to a
+    /// NUMA node (needed for NVIDIA Grace-Blackwell coherent C2C passthrough).
+    fn set_hmat(&mut self, is_on: bool) -> &mut Self {
+        self.hmat = is_on;
+        self
     }
 
     fn set_nvdimm(&mut self, is_on: bool) -> &mut Self {
@@ -558,6 +568,9 @@ impl ToQemuParams for Machine {
         }
         if self.nvdimm {
             params.push("nvdimm=on".to_owned());
+        }
+        if self.hmat {
+            params.push("hmat=on".to_owned());
         }
         if let Some(kernel_irqchip) = &self.kernel_irqchip {
             params.push(format!("kernel_irqchip={kernel_irqchip}"));
@@ -2218,6 +2231,66 @@ impl ToQemuParams for PCIeSwitchDownstreamPortDevice {
     }
 }
 
+/// `-numa node,nodeid=N` — declares an empty guest NUMA node.  Used in
+/// conjunction with `AcpiGenericInitiator` to expose a passthrough PCIe
+/// device's coherent memory (e.g. NVIDIA Grace-Blackwell HBM) as a guest
+/// NUMA node.
+#[derive(Debug, Clone)]
+struct NumaNodeId {
+    nodeid: u32,
+}
+
+impl NumaNodeId {
+    fn new(nodeid: u32) -> Self {
+        Self { nodeid }
+    }
+}
+
+#[async_trait]
+impl ToQemuParams for NumaNodeId {
+    async fn qemu_params(&self) -> Result<Vec<String>> {
+        Ok(vec![
+            "-numa".to_string(),
+            format!("node,nodeid={}", self.nodeid),
+        ])
+    }
+}
+
+/// `-object acpi-generic-initiator,id=<id>,pci-dev=<pci_dev>,node=<node>` —
+/// associates a PCIe endpoint (referenced by its QEMU device id) with a guest
+/// NUMA node so that the guest's ACPI SRAT exposes the device as an initiator
+/// for that node.  Required by the NVIDIA GB200/GH200 driver to discover the
+/// NUMA node id of the GPU's coherent HBM.
+#[derive(Debug, Clone)]
+struct AcpiGenericInitiator {
+    id_idx: u32,
+    pci_dev: String,
+    node: u32,
+}
+
+impl AcpiGenericInitiator {
+    fn new(id_idx: u32, pci_dev: impl Into<String>, node: u32) -> Self {
+        Self {
+            id_idx,
+            pci_dev: pci_dev.into(),
+            node,
+        }
+    }
+}
+
+#[async_trait]
+impl ToQemuParams for AcpiGenericInitiator {
+    async fn qemu_params(&self) -> Result<Vec<String>> {
+        Ok(vec![
+            "-object".to_string(),
+            format!(
+                "acpi-generic-initiator,id=gi{},pci-dev={},node={}",
+                self.id_idx, self.pci_dev, self.node
+            ),
+        ])
+    }
+}
+
 /// VFIO PCI device
 #[derive(Debug, Clone)]
 pub struct PCIeVfioDevice {
@@ -2227,6 +2300,10 @@ pub struct PCIeVfioDevice {
     iommufd: Option<String>,
     x_pci_vendor_id: Option<String>,
     x_pci_device_id: Option<String>,
+    /// Optional explicit QEMU device id.  Required when other QEMU objects
+    /// (e.g. `acpi-generic-initiator`) need to reference this vfio-pci device
+    /// via `pci-dev=<id>`.
+    id: Option<String>,
 }
 
 impl PCIeVfioDevice {
@@ -2242,7 +2319,13 @@ impl PCIeVfioDevice {
             iommufd: Some(iommufd.into()),
             x_pci_vendor_id: None,
             x_pci_device_id: None,
+            id: None,
         }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     #[allow(dead_code)]
@@ -2270,6 +2353,10 @@ impl ToQemuParams for PCIeVfioDevice {
         write!(params, "vfio-pci,host={}", self.host_bdf).unwrap();
         write!(params, ",bus={}", self.bus).unwrap();
         write!(params, ",addr={}", self.addr).unwrap();
+
+        if let Some(id) = &self.id {
+            write!(params, ",id={}", id).unwrap();
+        }
 
         if let Some(iommufd) = &self.iommufd {
             write!(params, ",iommufd={}", iommufd).unwrap();
@@ -2341,6 +2428,14 @@ pub struct VfioDeviceConfig {
     /// endpoints share a single host IOMMU group: QEMU expects a single
     /// iommufd backend instance bound to that group.
     pub iommufd_id: Option<String>,
+
+    /// When set, the device is treated as an NVIDIA Grace-Blackwell coherent
+    /// GPU and the generator emits the per-GPU NUMA node plus the
+    /// `acpi-generic-initiator` object QEMU needs to expose the GPU's
+    /// coherent HBM as guest NUMA memory.  The value is the guest NUMA node
+    /// id assigned to this GPU (starting at 1; node 0 is the CPU/main RAM
+    /// node).
+    pub gpu_numa_node: Option<u32>,
 }
 
 impl VfioDeviceConfig {
@@ -2360,6 +2455,7 @@ impl VfioDeviceConfig {
             x_pci_vendor_id: None,
             x_pci_device_id: None,
             iommufd_id: None,
+            gpu_numa_node: None,
         }
     }
 
@@ -2378,6 +2474,16 @@ impl VfioDeviceConfig {
     /// single iommufd object in QEMU.
     pub fn with_iommufd_id(mut self, iommufd_id: impl Into<String>) -> Self {
         self.iommufd_id = Some(iommufd_id.into());
+        self
+    }
+
+    /// Mark this device as an NVIDIA Grace-Blackwell coherent GPU and assign
+    /// it the given guest NUMA node id (>= 1).  Triggers emission of
+    /// `-numa node,nodeid=N` and the matching `acpi-generic-initiator` object
+    /// in the QEMU command line so the in-guest NVIDIA driver can resolve the
+    /// GPU's coherent HBM to a NUMA node (NV-C2C requirement).
+    pub fn with_gpu_numa_node(mut self, node: u32) -> Self {
+        self.gpu_numa_node = Some(node);
         self
     }
 
@@ -3049,7 +3155,24 @@ impl<'a> QemuCmdLine<'a> {
             vfio_device = vfio_device.with_device_id(device_id);
         }
 
-        self.devices.push(Box::new(vfio_device));
+        // NVIDIA Grace-Blackwell coherent GPU passthrough: associate the
+        // vfio-pci device with a dedicated guest NUMA node via an ACPI
+        // generic-initiator entry.  Without this the in-guest NVIDIA driver
+        // fails at `kmemsysSetupCoherentCpuLink_IMPL: Failed to get NUMA node
+        // id for GPU memory` and the GPU never initializes.  This matches
+        // the upstream NVIDIA/libvirt recipe (verified manually with QEMU
+        // 10.x + nvgrace_gpu_vfio_pci).
+        if let Some(node) = config.gpu_numa_node {
+            let vfio_id = format!("vfio_gpu{}", node);
+            vfio_device = vfio_device.with_id(&vfio_id);
+            self.machine.set_hmat(true);
+            self.devices.push(Box::new(vfio_device));
+            self.devices.push(Box::new(NumaNodeId::new(node)));
+            self.devices
+                .push(Box::new(AcpiGenericInitiator::new(node - 1, vfio_id, node)));
+        } else {
+            self.devices.push(Box::new(vfio_device));
+        }
 
         Ok(())
     }

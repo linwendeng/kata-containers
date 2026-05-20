@@ -231,6 +231,11 @@ impl QemuInner {
                         port_assignments.push(extra);
                     }
                     let mut next_port_idx = 0usize;
+                    // Per-sandbox counter of NVIDIA Grace-Blackwell coherent
+                    // GPUs cold-plugged so far.  Each gets a dedicated guest
+                    // NUMA node (starting at 1; node 0 is the main RAM node)
+                    // plus an `acpi-generic-initiator` binding.
+                    let mut gpu_numa_node_counter: u32 = 0;
 
                     // Cold plug devices
                     for dev in devices.iter() {
@@ -275,6 +280,29 @@ impl QemuInner {
                         // All endpoints of a single host IOMMU group must share
                         // the same iommufd object; tie it to the primary port id.
                         .with_iommufd_id(format!("iommufd{}", bus_port_id.0));
+
+                        // NVIDIA Grace-Blackwell coherent GPU: the in-guest
+                        // driver requires a per-GPU NUMA node + ACPI generic
+                        // initiator to discover the HBM as guest NUMA memory.
+                        // Gate on the host kernel driver name so we only do
+                        // this for nvgrace_gpu_vfio_pci endpoints.
+                        let vfio_cfg = if dev
+                            .driver
+                            .as_deref()
+                            .map(|d| d == "nvgrace_gpu_vfio_pci")
+                            .unwrap_or(false)
+                        {
+                            gpu_numa_node_counter += 1;
+                            info!(
+                                sl!(),
+                                "VFIO cold-plug: NVIDIA coherent GPU {} -> guest NUMA node {}",
+                                dev.addr,
+                                gpu_numa_node_counter,
+                            );
+                            vfio_cfg.with_gpu_numa_node(gpu_numa_node_counter)
+                        } else {
+                            vfio_cfg
+                        };
 
                         cmdline.add_pcie_vfio_device(vfio_cfg)?;
                     }
