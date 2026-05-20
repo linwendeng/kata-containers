@@ -1,0 +1,13 @@
+{
+  "metadata": {"name":"cuda"},
+  "image": {"image":"nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubi8"},
+  "command": ["/bin/sleep", "infinity"],
+  "log_path": "cuda.log",
+    "envs": [
+    {"key":"NVIDIA_VISIBLE_DEVICES","value":"all"},
+    {"key":"NVIDIA_DRIVER_CAPABILITIES","value":"all"}
+  ],
+  "linux": {
+    "security_context": {"privileged": true}
+  }
+}

@@ -23,3 +23,8 @@ site/
 opt/
 tools/packaging/kernel/configs/**/.config
 root_hash.txt
+
+# GB200 dev environment scratch (do not commit large binary artefacts)
+/helm-v*-linux-arm64.tar.gz
+/linux-arm64/
+/qemu/

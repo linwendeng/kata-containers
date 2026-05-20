@@ -1,0 +1,16 @@
+{
+  "metadata": {"name":"gpu-test-pod","namespace":"default","uid":"gpu-1","attempt":1},
+  "log_directory": "/tmp",
+  "linux": {
+  	"security_context": {
+      "privileged": true,
+      "namespace_options": { "network": 2 }
+    }
+  },
+  "annotations": {
+	  "io.katacontainers.config.hypervisor.cold_plug_vfio": "root-port",
+	  "io.katacontainers.config.runtime.vfio_mode": "vfio",
+      "cdi.k8s.io/vfio": "nvidia.com/vfio=gpu0,nvidia.com/vfio=gpu1,nvidia.com/vfio=gpu2,nvidia.com/vfio=gpu3"
+
+  }
+}
