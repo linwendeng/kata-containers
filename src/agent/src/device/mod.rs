@@ -575,7 +575,7 @@ fn update_spec_devices(
 // provided.
 #[instrument]
 pub fn pcipath_to_sysfs(root_bus_sysfs: &str, pcipath: &pci::Path) -> Result<String> {
-    let mut bus = "0000:00".to_string();
+    let mut bus = root_bus_from_sysfs(root_bus_sysfs)?;
     let mut relpath = String::new();
 
     for i in 0..pcipath.len() {
@@ -611,6 +611,23 @@ pub fn pcipath_to_sysfs(root_bus_sysfs: &str, pcipath: &pci::Path) -> Result<Str
     }
 
     Ok(relpath)
+}
+
+fn root_bus_from_sysfs(root_bus_sysfs: &str) -> Result<String> {
+    let address = std::path::Path::new(root_bus_sysfs)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("pci"))
+        .filter(|address| {
+            address.len() == 7
+                && address.as_bytes()[4] == b':'
+                && address
+                    .chars()
+                    .enumerate()
+                    .all(|(i, c)| i == 4 || c.is_ascii_hexdigit())
+        })
+        .ok_or_else(|| anyhow!("invalid PCI root bus path: {root_bus_sysfs}"))?;
+    Ok(address.to_string())
 }
 
 #[instrument]
@@ -1134,7 +1151,9 @@ mod tests {
     #[test]
     fn test_pcipath_to_sysfs() {
         let testdir = tempdir().expect("failed to create tmpdir");
-        let rootbuspath = testdir.path().to_str().unwrap();
+        let rootbuspath = testdir.path().join("pci0000:00");
+        fs::create_dir_all(&rootbuspath).unwrap();
+        let rootbuspath = rootbuspath.to_str().unwrap();
 
         let path2 = pci::Path::from_str("02").unwrap();
         let path23 = pci::Path::from_str("02/03").unwrap();
@@ -1195,16 +1214,27 @@ mod tests {
         assert_eq!(relpath.unwrap(), "/0000:00:02.0/0000:01:03.0/0000:02:04.0");
     }
 
+    #[test]
+    fn test_pcipath_to_sysfs_nonzero_root_segment() {
+        let testdir = tempdir().expect("failed to create tmpdir");
+        let rootbuspath = testdir.path().join("pci0001:80");
+        fs::create_dir_all(&rootbuspath).unwrap();
+        let path = pci::Path::from_str("00").unwrap();
+
+        let relpath = pcipath_to_sysfs(rootbuspath.to_str().unwrap(), &path).unwrap();
+        assert_eq!(relpath, "/0001:80:00.0");
+    }
+
     // We use device specific variants of this for real cases, but
     // they have some complications that make them troublesome to unit
     // test
     async fn example_get_device_name(
         sandbox: &Arc<Mutex<Sandbox>>,
-        root_complex: &str,
+        root_bus: &str,
         relpath: &str,
     ) -> Result<String> {
         let matcher =
-            crate::device::block_device_handler::VirtioBlkPciMatcher::new(relpath, root_complex);
+            crate::device::block_device_handler::VirtioBlkPciMatcher::new(relpath, root_bus);
 
         let uev = wait_for_uevent(sandbox, matcher).await?;
 
@@ -1232,7 +1262,7 @@ mod tests {
         sb.uevent_map.insert(devpath.clone(), uev);
         drop(sb); // unlock
 
-        let name = example_get_device_name(&sandbox, root_complex, relpath).await;
+        let name = example_get_device_name(&sandbox, &root_bus, relpath).await;
         assert!(name.is_ok(), "{}", name.unwrap_err());
         assert_eq!(name.unwrap(), devname);
 
@@ -1242,7 +1272,7 @@ mod tests {
 
         spawn_test_watcher(sandbox.clone(), uev);
 
-        let name = example_get_device_name(&sandbox, root_complex, relpath).await;
+        let name = example_get_device_name(&sandbox, &root_bus, relpath).await;
         assert!(name.is_ok(), "{}", name.unwrap_err());
         assert_eq!(name.unwrap(), devname);
     }

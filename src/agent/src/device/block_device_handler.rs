@@ -12,7 +12,7 @@ use crate::device::{
 #[cfg(target_arch = "s390x")]
 use crate::linux_abi::CCW_ROOT_BUS_PATH;
 use crate::linux_abi::{
-    create_pci_root_bus_path, pcipath_from_dev_tree_path, SYSFS_DIR, SYSTEM_DEV_PATH,
+    pcipath_from_dev_tree_path, resolve_pci_root_bus_path, SYSFS_DIR, SYSTEM_DEV_PATH,
 };
 use crate::pci;
 use crate::sandbox::Sandbox;
@@ -118,9 +118,10 @@ pub async fn get_virtio_blk_pci_device_name(
     root_complex: &str,
     pcipath: &pci::Path,
 ) -> Result<String> {
-    let root_bus_sysfs = format!("{}{}", SYSFS_DIR, create_pci_root_bus_path(root_complex));
+    let root_bus = resolve_pci_root_bus_path(root_complex)?;
+    let root_bus_sysfs = format!("{SYSFS_DIR}{root_bus}");
     let sysfs_rel_path = pcipath_to_sysfs(&root_bus_sysfs, pcipath)?;
-    let matcher = VirtioBlkPciMatcher::new(&sysfs_rel_path, root_complex);
+    let matcher = VirtioBlkPciMatcher::new(&sysfs_rel_path, &root_bus);
 
     let uev = wait_for_uevent(sandbox, matcher).await?;
     Ok(format!("{}/{}", SYSTEM_DEV_PATH, &uev.devname))
@@ -171,8 +172,7 @@ pub struct VirtioBlkPciMatcher {
 }
 
 impl VirtioBlkPciMatcher {
-    pub fn new(relpath: &str, root_complex: &str) -> VirtioBlkPciMatcher {
-        let root_bus = create_pci_root_bus_path(root_complex);
+    pub fn new(relpath: &str, root_bus: &str) -> VirtioBlkPciMatcher {
         let re = format!(r"^{root_bus}{relpath}/virtio[0-9]+/block/");
 
         VirtioBlkPciMatcher {
@@ -239,21 +239,21 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::redundant_clone)]
     async fn test_virtio_blk_matcher() {
-        let root_bus = create_pci_root_bus_path("00");
+        let root_bus = "/devices/platform/4010000000.pcie/pci0001:80";
         let devname = "vda";
 
         let mut uev_a = crate::uevent::Uevent::default();
-        let relpath_a = "/0000:00:0a.0";
+        let relpath_a = "/0001:80:0a.0";
         uev_a.action = crate::linux_abi::U_EVENT_ACTION_ADD.to_string();
         uev_a.subsystem = BLOCK.to_string();
         uev_a.devname = devname.to_string();
         uev_a.devpath = format!("{root_bus}{relpath_a}/virtio4/block/{devname}");
-        let matcher_a = VirtioBlkPciMatcher::new(relpath_a, "00");
+        let matcher_a = VirtioBlkPciMatcher::new(relpath_a, &root_bus);
 
         let mut uev_b = uev_a.clone();
-        let relpath_b = "/0000:00:0a.0/0000:00:0b.0";
+        let relpath_b = "/0001:80:0a.0/0001:81:0b.0";
         uev_b.devpath = format!("{root_bus}{relpath_b}/virtio0/block/{devname}");
-        let matcher_b = VirtioBlkPciMatcher::new(relpath_b, "00");
+        let matcher_b = VirtioBlkPciMatcher::new(relpath_b, &root_bus);
 
         assert!(matcher_a.is_match(&uev_a));
         assert!(matcher_b.is_match(&uev_b));

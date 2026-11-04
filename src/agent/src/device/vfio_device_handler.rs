@@ -214,7 +214,7 @@ pub struct PciMatcher {
 
 impl PciMatcher {
     pub fn new(relpath: &str, root_complex: &str) -> Result<PciMatcher> {
-        let root_bus = create_pci_root_bus_path(root_complex);
+        let root_bus = resolve_pci_root_bus_path(root_complex)?;
         Ok(PciMatcher {
             devpath: format!("{root_bus}{relpath}"),
         })
@@ -306,7 +306,7 @@ pub async fn wait_for_pci_device(
     root_complex: &str,
     pcipath: &pci::Path,
 ) -> Result<pci::Address> {
-    let root_bus_sysfs = format!("{}{}", SYSFS_DIR, create_pci_root_bus_path(root_complex));
+    let root_bus_sysfs = format!("{}{}", SYSFS_DIR, resolve_pci_root_bus_path(root_complex)?);
     let sysfs_rel_path = pcipath_to_sysfs(&root_bus_sysfs, pcipath)?;
     let matcher = PciMatcher::new(&sysfs_rel_path, root_complex)?;
 
