@@ -629,7 +629,9 @@ fn make_coherent_gpu_root_complex(
     // BAR at GPA == HPA; the root complex node is its first GI node (_PXM).
     Ok(vmservice::PcieRootComplex {
         name: format!("gpurc{index}"),
-        segment: 0,
+        // Segment zero belongs to rc0. IORT identifies each root complex by
+        // segment, even when their bus ranges are disjoint.
+        segment: u32::from(*index) + 1,
         start_bus: u32::from(*start_bus),
         end_bus: u32::from(end_bus),
         low_mmio: OPENVMM_GPU_LOW_MMIO_SIZE,
@@ -1208,6 +1210,7 @@ impl OpenVmmInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protobuf::Message;
 
     fn pending_vfio_device(primary_bdf: &str, host_bdfs: &[&str]) -> Result<PendingVfioDevice> {
         PendingVfioDevice::new(
@@ -1288,6 +1291,7 @@ mod tests {
 
         let root = make_coherent_gpu_root_complex(&plan.assignments[1]).unwrap();
         assert_eq!(root.name, "gpurc0");
+        assert_eq!(root.segment, 1);
         assert_eq!(root.start_bus, 128);
         assert_eq!(root.end_bus, 143);
         assert_eq!(root.high_mmio_base, Some(0x4400_0000_0000));
@@ -1325,6 +1329,54 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("gpu0", 1), ("gpu0", 2), ("gpu0", 3)]
         );
+    }
+
+    #[test]
+    fn coherent_gpu_topology_assigns_unique_segments_before_serialization() {
+        let devices = [
+            "0008:06:00.0",
+            "0009:06:00.0",
+            "0018:06:00.0",
+            "0019:06:00.0",
+        ];
+        let plan = plan_vfio_devices_with(
+            devices
+                .iter()
+                .map(|bdf| pending_vfio_device(bdf, &[*bdf]).unwrap())
+                .collect(),
+            |_| {
+                Ok(Some(CoherentBar {
+                    index: 2,
+                    hpa: 0x4400_0000_0000,
+                    size: 0x2e_41f0_0000,
+                }))
+            },
+        )
+        .unwrap();
+        let (topology, _) = make_pcie_topology(Vec::new(), &plan.assignments).unwrap();
+        let encoded = topology.write_to_bytes().unwrap();
+        let topology = vmservice::PcieTopologyConfig::parse_from_bytes(&encoded).unwrap();
+        assert_eq!(
+            topology
+                .root_complexes
+                .iter()
+                .map(|rc| rc.segment)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4]
+        );
+        assert_eq!(
+            topology
+                .root_complexes
+                .iter()
+                .map(|rc| rc.start_bus)
+                .collect::<Vec<_>>(),
+            [0, 0x80, 0x90, 0xa0, 0xb0]
+        );
+        let (again, _) = make_pcie_topology(Vec::new(), &plan.assignments).unwrap();
+        assert_eq!(again, topology);
+        let (without_gpus, _) = make_pcie_topology(Vec::new(), &[]).unwrap();
+        assert_eq!(without_gpus.root_complexes.len(), 1);
+        assert_eq!(without_gpus.root_complexes[0].segment, 0);
     }
 
     #[test]
